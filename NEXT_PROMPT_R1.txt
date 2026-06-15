@@ -1,0 +1,1 @@
+有几个问题：1. 我跑 gotrace --ipv4 baidu.com 直接报 flag 没定义就退出。2. gotrace --first 也报 flag 没定义，IP 多选 flag 全不可用。3. 每跳输出里完全没有 ASN 和地理位置，只剩 IP 和反查主机名。4. 非管理员环境 UDP 模式跑 baidu.com 所有跳都是三个星号。检查修复一下。
