@@ -1,0 +1,6 @@
+# Build artifacts
+gotrace.exe
+*.exe
+
+# Output
+output/

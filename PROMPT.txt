@@ -1,0 +1,21 @@
+想自己实现一个简化版的 traceroute 命令，用 Go 写。网络上数据包的路由跳数是排查网络问题的重要工具，系统自带的 traceroute 在不同平台行为差异大，我想写一个统一行为的实现。Go 标准库的 net 包加上 syscall 包够用了，不用第三方库。
+
+工具的用法大概是这样：gotrace baidu.com 这是最常用的形式，IPv4 默认探测，目标域名会自动 DNS 解析。gotrace --udp baidu.com 用 UDP 模式（默认也是 UDP），gotrace --icmp baidu.com 切换到 ICMP 模式。gotrace --max-hops 30 baidu.com 改最大跳数（默认 30），gotrace --timeout 2s baidu.com 改单跳超时（默认 3 秒），gotrace --port 33434 baidu.com 改 UDP 起始端口（默认 33434 沿用惯例）。gotrace --ipv6 baidu.com 走 IPv6 解析（如果目标有 AAAA 记录）。
+
+UDP 模式工作原理：发送 TTL=1 的 UDP 包到目标端口（默认 33434），期望收到上一跳路由器返回的 ICMP Time Exceeded 报文，记录这个路由器的 IP 和响应时间。然后 TTL=2, 3, 4 一直发，直到收到 ICMP Port Unreachable（说明到了目标主机）或者达到 max-hops 没收到就显示 * * *。
+
+ICMP 模式工作原理：发送 ICMP Echo Request 出去（用 syscall 直接构造 ICMP 报文），期望收到回包的 ICMP Echo Reply 和沿途的 Time Exceeded。Go 标准库没有直接的高层 ICMP 接口需要用 syscall.Socket 自己 raw socket。
+
+这里有个比较坑的权限问题：发送 raw ICMP 报文需要 root 或者 CAP_NET_RAW 权限，普通用户跑不了。UDP 模式好一点但还是要能构造 IP 头部的 TTL 字段（用 IP_TTL socket option 不用 raw socket，普通用户就能用）。工具启动的时候要检测当前用户权限跟探测模式的兼容性，不能用 ICMP 模式的时候给出明确提示"need root for ICMP mode, try --udp instead"。如果发现当前是普通用户还指定了 --icmp，工具自动降级到 UDP 模式并打一行提示。
+
+UDP 在 NAT 后面会出现 NAT 设备回不了 ICMP Time Exceeded 的情况，这种跳就显示成 * * * 跟探测包丢失一样，但用户其实分不清是真的丢包还是 NAT 拦截了。这个要稍微提示一下"hops shown as * * * may be NAT devices blocking ICMP"。
+
+路径输出格式：每一跳打印一行，类似 traceroute 的标准格式：hop_num  rtt1(ms)  rtt2(ms)  rtt3(ms)  ip  hostname(asn/geo)。每个跳发三个包测三次 RTT 算平均值。hostname 通过反向 DNS 查（net.LookupAddr），查不到就显示 IP。ASN 跟 Geo 信息可以本地维护一个简单 IP 段数据库或者干脆不显示，让用户自己看 IP。
+
+超时控制要细：每个跳的探测包要单独起 goroutine + select + timer，超时了不阻塞后续探测。所有跳并发发出去（同一个 TTL 内并发）能大幅加快探测速度，比传统串行快几倍。但同一个 TTL 内并发的探测包响应回来要按发送顺序匹配 RTT 显示。
+
+路径跟踪的最终输出：跳数列表 + 总结（目标是否可达、总耗时、平均 RTT、最大 RTT、丢包跳数）。如果探测完成发现某跳之后所有跳都是 * * * 通常说明那一跳的路由器配置不响应或者有防火墙。
+
+输出格式还可以更友好一点。每一跳除了 IP 之外显示一个 AS 号（自治系统号）和地理位置（国家/城市）。AS 号查询可以调用 whois 或者 IPIP.net 之类的公开 API（每次探测中途访问一次不要每次启动都缓存）。地理位置用本地一份 IP 段数据库（开源的 ip2region 或者纯真 IP 库都成），首次启动加载到内存里后续查都很快。
+
+DNS 解析的细节。目标域名可能同时有 A 记录和 AAAA 记录，--ipv4 --ipv6 标志位控制只解析哪种。--ipv4-only 显式只查 A 记录。域名解析要并行查多家 DNS（系统配置的 + 用户指定的几家）做对照，返回最快的那家的结果。多 IP 目标（比如 baidu.com 有几十个 A 记录）要选哪一个去探测——可以默认选第一个，也可以让用户 --first 或者 --random 或者全部探测（all）。
